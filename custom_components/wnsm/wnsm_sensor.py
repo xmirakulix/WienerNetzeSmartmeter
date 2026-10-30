@@ -24,9 +24,10 @@ _LOGGER = logging.getLogger(__name__)
 def eeg_splits(anlagetype: Optional[str]) -> tuple:
     """(statistic suffix, role, role to subtract) per Energiegemeinschaft statistic.
 
-    Consumption: G001 from the grid, G003 from the community.
-    Feed-in: U001 to the grid; the share delivered to the community has no
-    role of its own and is the total feed-in E002 minus U001.
+    _grid is the residual over all communities: G001 for consumption, U001 for
+    feed-in. The community share (G003 and the like) is defined per community,
+    so with several participations a query by role would be ambiguous; _eeg is
+    therefore the total minus the residual (V002 - G001, E002 - U001).
     """
     if anlagetype == AnlagenType.FEEDING.value:
         return (
@@ -35,7 +36,7 @@ def eeg_splits(anlagetype: Optional[str]) -> tuple:
         )
     return (
         ("_grid", RoleType.GRID_CONSUMING.value, None),
-        ("_eeg", RoleType.EEG_CONSUMING.value, None),
+        ("_eeg", RoleType.QUARTER_HOURLY_CONSUMING.value, RoleType.GRID_CONSUMING.value),
     )
 
 
@@ -118,7 +119,16 @@ class WNSMSensor(SensorEntity):
                 await importer.async_import()
                 if await async_smartmeter.has_energiegemeinschaft(self.zaehlpunkt):
                     for suffix, rolle, subtract_rolle in eeg_splits(zaehlpunkt_response.get("type")):
-                        eeg_importer = Importer(self.hass, async_smartmeter, self.zaehlpunkt, self.unit_of_measurement, ValueType.QUARTER_HOUR, statistic_suffix=suffix, rolle=rolle, subtract_rolle=subtract_rolle)
+                        eeg_importer = Importer(
+                            self.hass,
+                            async_smartmeter,
+                            self.zaehlpunkt,
+                            self.unit_of_measurement,
+                            ValueType.QUARTER_HOUR,
+                            statistic_suffix=suffix,
+                            rolle=rolle,
+                            subtract_rolle=subtract_rolle,
+                        )
                         await eeg_importer.async_import()
             self._available = True
             self._updatets = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
