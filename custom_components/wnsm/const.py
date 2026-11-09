@@ -2,6 +2,8 @@
     component constants
 """
 DOMAIN = "wnsm"
+# logged on every update, so a shared log shows which build produced it; keep in sync with manifest.json
+DIAGNOSTIC_BUILD = "1.9.1-eeg-diagnose.3"
 
 CONF_ZAEHLPUNKTE = "zaehlpunkte"
 

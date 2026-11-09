@@ -22,6 +22,7 @@ from .AsyncSmartmeter import AsyncSmartmeter
 from .api.constants import ValueType
 from .api.errors import SmartmeterError
 from .const import DOMAIN
+from .utils import mask_zaehlpunkt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -62,6 +63,15 @@ def _bucket(bewegungsdaten: dict, start: datetime) -> dict:
     return _bucket_by_hour(bewegungsdaten.get('values') or [], factor, start)
 
 
+def _describe(bewegungsdaten: dict) -> str:
+    """Shape of a bewegungsdaten response without customer data or readings."""
+    values = bewegungsdaten.get('values') or []
+    present = [v['zeitpunktVon'] for v in values if v.get('wert') is not None]
+    return (f"role={bewegungsdaten.get('role')} granularity={bewegungsdaten.get('granularity')} "
+            f"unit={bewegungsdaten.get('unitOfMeasurement')} values={len(values)} with_value={len(present)} "
+            f"first={present[0] if present else None} last={present[-1] if present else None}")
+
+
 def _subtract(minuend: dict, subtrahend: dict) -> dict:
     """Per-timestamp difference of two bewegungsdaten responses.
 
@@ -89,8 +99,8 @@ def _subtract(minuend: dict, subtrahend: dict) -> dict:
                        'wert': max(difference, 0),
                        'geschaetzt': bool(value.get('geschaetzt') or match.get('geschaetzt'))})
     if skipped or clamped:
-        _LOGGER.debug("Difference of %s and %s: %d values skipped for a missing side, %d negative values set to 0",
-                      minuend.get('role'), subtrahend.get('role'), skipped, clamped)
+        _LOGGER.warning("[diag] Difference of %s and %s: %d values skipped for a missing side, %d negative values set to 0",
+                        minuend.get('role'), subtrahend.get('role'), skipped, clamped)
     return {**minuend, 'values': values}
 
 
@@ -106,6 +116,7 @@ class Importer:
         self.statistic_suffix = statistic_suffix
         self.rolle = rolle
         self.subtract_rolle = subtract_rolle
+        self.label = f'{DOMAIN}:{mask_zaehlpunkt(zaehlpunkt)}{statistic_suffix}'
 
     def is_last_inserted_stat_valid(self, last_inserted_stat):
         return len(last_inserted_stat) == 1 and len(last_inserted_stat[self.id]) == 1 and \
@@ -169,13 +180,18 @@ class Importer:
 
             if not self.is_last_inserted_stat_valid(last_inserted_stat):
                 # No previous data - start from scratch
-                _LOGGER.warning("Starting import of historical data. This might take some time.")
+                _LOGGER.warning("Starting import of historical data for %s. This might take some time.", self.label)
                 _sum = await self._initial_import_statistics()
             else:
                 start_off_point = self.prepare_start_off_point(last_inserted_stat)
                 if start_off_point is None:
+                    end = last_inserted_stat[self.id][0].get("end")
+                    if isinstance(end, (int, float)):
+                        end = dt_util.utc_from_timestamp(end)
+                    _LOGGER.warning("[diag] %s: no incremental import, last statistic ends %s", self.label, end)
                     return
                 start, _sum = start_off_point
+                _LOGGER.warning("[diag] %s: incremental import from %s, sum so far %.3f", self.label, start, _sum)
                 _sum = await self._incremental_import_statistics(start, _sum)
 
             # XXX: Note that the state of this sensor must never be an integer value, such as 0!
@@ -196,13 +212,13 @@ class Importer:
             )
             _LOGGER.debug("Last inserted stat: %s", last_inserted_stat)
         except TimeoutError as e:
-            _LOGGER.warning("Error retrieving data from smart meter api - Timeout: %s" % e)
+            _LOGGER.warning("Error retrieving data from smart meter api for %s - Timeout: %s", self.label, e)
         except (RuntimeError, SmartmeterError) as e:
             error_response = getattr(e, "error_response", None)
             if error_response:
-                _LOGGER.warning("Error retrieving data from smart meter api - Error: %s; Response: %s", e, error_response)
+                _LOGGER.warning("Error retrieving data from smart meter api for %s - Error: %s; Response: %s", self.label, e, error_response)
             else:
-                _LOGGER.warning("Error retrieving data from smart meter api - Error: %s", e)
+                _LOGGER.warning("Error retrieving data from smart meter api for %s - Error: %s", self.label, e)
 
     def get_statistics_metadata(self):
         return StatisticMetaData(
@@ -225,11 +241,13 @@ class Importer:
 
     async def _fetch(self, start: datetime, end: datetime, granularity: ValueType) -> dict:
         data = await self.async_smartmeter.get_bewegungsdaten(self.zaehlpunkt, start, end, granularity, self.rolle)
+        _LOGGER.warning("[diag] %s: %s %s to %s: %s", self.label, granularity.value, start, end, _describe(data))
         if self.subtract_rolle is None:
             return data
         subtrahend = await self.async_smartmeter.get_bewegungsdaten(
             self.zaehlpunkt, start, end, granularity, self.subtract_rolle
         )
+        _LOGGER.warning("[diag] %s: %s %s to %s: %s", self.label, granularity.value, start, end, _describe(subtrahend))
         return _subtract(data, subtrahend)
 
     async def _get_bewegungsdaten(self, start: datetime, end: datetime) -> dict:
@@ -240,8 +258,8 @@ class Importer:
         # Profile roles like G001/G003 have no daily counterpart; the daily V001
         # would be total consumption, so they never fall back.
         if self.rolle is None and self.granularity != ValueType.DAY and data.get('unitOfMeasurement') is None:
-            _LOGGER.info("No %s data for %s; falling back to daily granularity",
-                         self.granularity.value, self.zaehlpunkt)
+            _LOGGER.warning("[diag] No %s data for %s; falling back to daily granularity",
+                            self.granularity.value, self.label)
             return await self._fetch(start, end, ValueType.DAY)
         return data
 
@@ -255,7 +273,7 @@ class Importer:
         """
         daily = await self._fetch(start, end, ValueType.DAY)
         if daily.get('unitOfMeasurement') is None:
-            _LOGGER.warning("Unit of measurement is None! Aborting import...")
+            _LOGGER.warning("Unit of measurement is None! Aborting import of %s...", self.label)
             return {}
         dates = _bucket(daily, start)
 
@@ -271,7 +289,7 @@ class Importer:
         bewegungsdaten = await self._get_bewegungsdaten(start, end)
         _LOGGER.debug(f"Mapped historical data: {bewegungsdaten}")
         if bewegungsdaten['unitOfMeasurement'] is None:
-            _LOGGER.warning("Unit of measurement is None! Aborting import...")
+            _LOGGER.warning("Unit of measurement is None! Aborting import of %s...", self.label)
             return {}
         return _bucket(bewegungsdaten, start)
 
@@ -292,7 +310,7 @@ class Importer:
 
         dates = await self._collect_dates(start, end, recover_quarter_hour)
         if not dates or sum(dates.values()) == 0:
-            _LOGGER.debug(f"Batch of data starting at {start} does not contain any bewegungsdaten. Seems there is nothing to import, yet.")
+            _LOGGER.warning("[diag] %s: nothing to import from %s to %s", self.label, start, end)
             return None
 
         statistics = []
@@ -300,6 +318,7 @@ class Importer:
         for ts, usage in sorted(dates.items(), key=itemgetter(0)):
             total_usage += usage
             statistics.append(StatisticData(start=ts, sum=total_usage, state=float(usage)))
-        _LOGGER.debug(f"Importing statistics from {statistics[0]} to {statistics[-1]}")
+        _LOGGER.warning("[diag] %s: importing %d hours from %s to %s, sum now %.3f",
+                        self.label, len(statistics), statistics[0]["start"], statistics[-1]["start"], total_usage)
         async_add_external_statistics(self.hass, metadata, statistics)
         return total_usage

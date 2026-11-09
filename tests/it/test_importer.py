@@ -512,11 +512,11 @@ def test_subtract_converts_units_and_never_goes_negative():
     assert [v["wert"] for v in result["values"]] == [0.75, 0]
 
 
-def test_subtract_logs_skipped_and_clamped_values_at_debug(caplog):
+def test_subtract_logs_skipped_and_clamped_values(caplog):
     minuend = _data("KWH", [_value(T0, 1.0), _value(T1, 0.5), _value(T2, 2.0)])
     subtrahend = _data("KWH", [_value(T0, 0.5), _value(T1, 0.6)])
 
-    with caplog.at_level(logging.DEBUG, logger="custom_components.wnsm.importer"):
+    with caplog.at_level(logging.WARNING):
         _subtract(minuend, subtrahend)
 
     assert "1 values skipped for a missing side, 1 negative values set to 0" in caplog.text
@@ -541,3 +541,33 @@ async def test_fetch_with_subtract_role_queries_both_roles():
     assert [v["wert"] for v in result["values"]] == [0.5]
     importer.async_smartmeter.get_bewegungsdaten.assert_any_await(ZAEHLPUNKT, START, END, ValueType.QUARTER_HOUR, "E002")
     importer.async_smartmeter.get_bewegungsdaten.assert_any_await(ZAEHLPUNKT, START, END, ValueType.QUARTER_HOUR, "U001")
+
+
+@pytest.mark.asyncio
+async def test_fetch_logs_shape_of_both_responses_without_zaehlpunkt(caplog):
+    importer = Importer(hass=None, async_smartmeter=AsyncMock(), zaehlpunkt=ZAEHLPUNKT, unit_of_measurement="kWh",
+                        statistic_suffix="_eeg", rolle="V002", subtract_rolle="G001")
+    importer.async_smartmeter.get_bewegungsdaten.side_effect = [
+        {**_data(None), "role": "V002"},
+        {**_data("KWH", [_value(T0, 2.5), _value(T1, None)]), "role": "G001"},
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        await importer._fetch(START, END, ValueType.QUARTER_HOUR)
+
+    assert "wnsm:…1111_eeg" in caplog.text
+    assert "role=V002 granularity=None unit=None values=0 with_value=0" in caplog.text
+    assert "role=G001 granularity=None unit=KWH values=2 with_value=1" in caplog.text
+    assert ZAEHLPUNKT not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_collect_dates_names_the_statistic_when_aborting(caplog):
+    importer = Importer(hass=None, async_smartmeter=AsyncMock(), zaehlpunkt=ZAEHLPUNKT, unit_of_measurement="kWh",
+                        statistic_suffix="_grid", rolle="G001")
+    importer.async_smartmeter.get_bewegungsdaten.return_value = _data(None)
+
+    with caplog.at_level(logging.WARNING):
+        assert await importer._collect_dates(START, END, recover_quarter_hour=True) == {}
+
+    assert "Unit of measurement is None! Aborting import of wnsm:…1111_grid..." in caplog.text

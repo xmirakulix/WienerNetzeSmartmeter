@@ -15,8 +15,9 @@ from .AsyncSmartmeter import AsyncSmartmeter
 from .api import Smartmeter
 from .api.constants import AnlagenType, RoleType, ValueType
 from .api.errors import SmartmeterError
+from .const import DIAGNOSTIC_BUILD
 from .importer import Importer
-from .utils import before, today
+from .utils import before, today, mask_zaehlpunkt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,6 +109,10 @@ class WNSMSensor(SensorEntity):
             await async_smartmeter.login()
             zaehlpunkt_response = await async_smartmeter.get_zaehlpunkt(self.zaehlpunkt)
             self._attr_extra_state_attributes = zaehlpunkt_response
+            _LOGGER.warning("[diag] Update of %s with build %s: type=%s granularity=%s active=%s",
+                            mask_zaehlpunkt(self.zaehlpunkt), DIAGNOSTIC_BUILD, zaehlpunkt_response.get("type"),
+                            # raw value: an inactive zaehlpunkt may carry one that granularity() rejects
+                            zaehlpunkt_response.get("granularity"), async_smartmeter.is_active(zaehlpunkt_response))
 
             if async_smartmeter.is_active(zaehlpunkt_response):
                 # Since the update is not exactly at midnight, both yesterday and the day before are tried to make sure a meter reading is returned

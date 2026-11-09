@@ -15,6 +15,13 @@ def today(tz: Optional[timezone] = None) -> datetime:
     return datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
+def mask_zaehlpunkt(zaehlpunkt: Optional[str]) -> str:
+    """
+    shorten a zaehlpunkt to its last four digits, so log lines can be shared as they are
+    """
+    return f"…{(zaehlpunkt or '')[-4:]}"
+
+
 def before(timestamp: Optional[datetime] = None, days=1) -> datetime:
     """
     subtract {days} days from given datetime (default: 1)

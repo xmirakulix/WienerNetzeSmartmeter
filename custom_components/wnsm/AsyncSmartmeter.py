@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 from .api import Smartmeter
 from .api.constants import ValueType
 from .const import ATTRS_METERREADINGS_CALL, ATTRS_BASEINFORMATION_CALL, ATTRS_CONSUMPTIONS_CALL, ATTRS_BEWEGUNGSDATEN, ATTRS_ZAEHLPUNKTE_CALL, ATTRS_HISTORIC_DATA, ATTRS_VERBRAUCH_CALL
-from .utils import translate_dict
+from .utils import translate_dict, mask_zaehlpunkt
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -176,10 +176,12 @@ class AsyncSmartmeter:
         try:
             zaehlwerke = await self.get_zaehlwerke(zaehlpunkt)
         except Exception as e:  # pylint: disable=broad-exception-caught  # detection must never break the regular update
-            _LOGGER.warning("Could not determine Energiegemeinschaft participation for %s: %s", zaehlpunkt, e)
+            _LOGGER.warning("Could not determine Energiegemeinschaft participation for %s: %s", mask_zaehlpunkt(zaehlpunkt), e)
             return False
         today = datetime.now().date()
         teilnahmen = zaehlwerke.get("eagTeilnahmen", []) or []
+        # only these fields, so the line can be posted without redacting
+        summary = [{key: t.get(key) for key in ("status", "dateFrom", "dateTo")} for t in teilnahmen]
         for teilnahme in teilnahmen:
             if teilnahme.get("status") != "A":
                 continue
@@ -189,9 +191,11 @@ class AsyncSmartmeter:
             except (KeyError, ValueError):
                 continue
             if date_from <= today <= date_to:
-                _LOGGER.debug("Active Energiegemeinschaft participation for %s since %s", zaehlpunkt, date_from)
+                _LOGGER.warning("[diag] Active Energiegemeinschaft participation for %s since %s, eagTeilnahmen: %s",
+                                mask_zaehlpunkt(zaehlpunkt), date_from, summary)
                 return True
-        _LOGGER.debug("No active Energiegemeinschaft participation for %s, eagTeilnahmen: %s", zaehlpunkt, teilnahmen)
+        _LOGGER.warning("[diag] No active Energiegemeinschaft participation for %s, eagTeilnahmen: %s",
+                        mask_zaehlpunkt(zaehlpunkt), summary)
         return False
 
     async def get_consumptions(self) -> dict[str, str]:
